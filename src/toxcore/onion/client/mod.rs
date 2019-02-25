@@ -14,7 +14,7 @@ use failure::Fail;
 use futures::{Future, Stream, future, stream};
 use futures::future::Either;
 use futures::sync::mpsc;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use tokio::timer::Interval;
 
 use crate::toxcore::crypto_core::*;
@@ -304,7 +304,7 @@ pub struct OnionClient {
     tcp_connections: TcpConnections,
     /// Sink to send DHT `PublicKey` when it gets known. The first key is a long
     /// term key, the second key is a DHT key.
-    dht_pk_tx: DhtPkTx,
+    dht_pk_tx: Arc<RwLock<Option<DhtPkTx>>>,
     /// Our long term `SecretKey`.
     real_sk: SecretKey,
     /// Our long term `PublicKey`.
@@ -323,7 +323,6 @@ impl OnionClient {
     pub fn new(
         dht: DhtServer,
         tcp_connections: TcpConnections,
-        dht_pk_tx: DhtPkTx,
         real_sk: SecretKey,
         real_pk: PublicKey
     ) -> Self {
@@ -331,13 +330,17 @@ impl OnionClient {
         OnionClient {
             dht,
             tcp_connections,
-            dht_pk_tx,
+            dht_pk_tx: Arc::new(RwLock::new(None)),
             real_sk,
             real_pk,
             data_sk,
             data_pk,
             state: Arc::new(Mutex::new(OnionClientState::new())),
         }
+    }
+
+    pub fn set_dht_pk_sink(&self, dht_pk_tx: DhtPkTx) {
+        *self.dht_pk_tx.write() = Some(dht_pk_tx);
     }
 
     fn is_redundant_ping(&self, pk: PublicKey, search_pk: PublicKey, request_queue: &RequestQueue<AnnounceRequestData>) -> bool {
@@ -482,7 +485,11 @@ impl OnionClient {
         friend.dht_pk = Some(dht_pk_announce.dht_pk);
         friend.last_seen = Some(clock_now());
 
-        let dht_pk_future = send_to(&self.dht_pk_tx, (friend_pk, dht_pk_announce.dht_pk));
+        let dht_pk_future = if let Some(ref dht_pk_tx) = *self.dht_pk_tx.read() {
+            Either::A(send_to(dht_pk_tx, (friend_pk, dht_pk_announce.dht_pk)))
+        } else {
+            Either::B(future::ok(()))
+        };
 
         let futures = dht_pk_announce.nodes.into_iter().map(|node| match node.ip_port.protocol {
             ProtocolType::UDP => {

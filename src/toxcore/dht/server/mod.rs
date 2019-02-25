@@ -119,7 +119,7 @@ pub struct Server {
     /// Tx split of a channel to send packets to this peer via UDP socket.
     pub tx: Tx,
     /// Sink to send friend's `SocketAddr` when it gets known.
-    friend_saddr_sink: Option<mpsc::UnboundedSender<PackedNode>>,
+    friend_saddr_sink: Arc<RwLock<Option<mpsc::UnboundedSender<PackedNode>>>>,
     /// Struct that stores and manages requests IDs and timeouts.
     request_queue: Arc<RwLock<RequestQueue<PublicKey>>>,
     /// Close nodes list which contains nodes close to own DHT `PublicKey`.
@@ -165,6 +165,10 @@ pub struct Server {
     /// pure bootstrap server when we don't have friends and therefore don't
     /// have to handle related packets.
     net_crypto: Option<NetCrypto>,
+
+    onion_announce_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>>>>,
+    onion_data_tx: Arc<RwLock<Option<mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>>>>,
+
     /// If LAN discovery is enabled `Server` will handle `LanDiscovery` packets
     /// and send `NodesRequest` packets in reply.
     lan_discovery_enabled: bool,
@@ -208,7 +212,7 @@ impl Server {
             sk,
             pk,
             tx,
-            friend_saddr_sink: None,
+            friend_saddr_sink: Arc::new(RwLock::new(None)),
             request_queue: Arc::new(RwLock::new(RequestQueue::new(Duration::from_secs(PING_TIMEOUT)))),
             close_nodes: Arc::new(RwLock::new(Ktree::new(&pk))),
             onion_symmetric_key: Arc::new(RwLock::new(secretbox::gen_key())),
@@ -222,6 +226,8 @@ impl Server {
             bootstrap_info: None,
             tcp_onion_sink: None,
             net_crypto: None,
+            onion_announce_tx: Arc::new(RwLock::new(None)),
+            onion_data_tx: Arc::new(RwLock::new(None)),
             lan_discovery_enabled: true,
             is_ipv6_enabled: false,
             initial_bootstrap: Vec::new(),
@@ -706,14 +712,8 @@ impl Server {
             Packet::OnionResponse1(packet) => Box::new(self.handle_onion_response_1(packet)),
             Packet::BootstrapInfo(packet) => Box::new(self.handle_bootstrap_info(&packet, addr)),
             Packet::CryptoData(packet) => Box::new(self.handle_crypto_data(&packet, addr)),
-            // This packet should be handled in client only
-            Packet::OnionDataResponse(_packet) => Box::new(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::NotHandled)
-            )),
-            // This packet should be handled in client only
-            Packet::OnionAnnounceResponse(_packet) => Box::new(future::err(
-                HandlePacketError::from(HandlePacketErrorKind::NotHandled)
-            )),
+            Packet::OnionDataResponse(packet) => Box::new(self.handle_onion_data_response(packet, addr)),
+            Packet::OnionAnnounceResponse(packet) => Box::new(self.handle_onion_announce_response(packet, addr)),
         }
     }
 
@@ -757,7 +757,7 @@ impl Server {
         for friend in friends.values_mut() {
             friend.try_add_to_close(node);
         }
-        if let Some(ref friend_saddr_sink) = self.friend_saddr_sink {
+        if let Some(ref friend_saddr_sink) = *self.friend_saddr_sink.read() {
             if friends.contains_key(&node.pk) {
                 Either::A(send_to(friend_saddr_sink, node)
                     .map_err(|e| e.context(HandlePacketErrorKind::FriendSaddr).into()))
@@ -1416,6 +1416,24 @@ impl Server {
         nodes
     }
 
+    fn handle_onion_announce_response(&self, packet: OnionAnnounceResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
+        if let Some(ref onion_announce_tx) = *self.onion_announce_tx.read() {
+            Either::A(send_to(onion_announce_tx, (packet, addr))
+                .map_err(HandlePacketError::from))
+        } else {
+            Either::B(future::err(HandlePacketError::from(HandlePacketErrorKind::OnionOrNetCrypto)))
+        }
+    }
+
+    fn handle_onion_data_response(&self, packet: OnionDataResponse, addr: SocketAddr) -> impl Future<Item = (), Error = HandlePacketError> + Send {
+        if let Some(ref onion_data_tx) = *self.onion_data_tx.read() {
+            Either::A(send_to(onion_data_tx, (packet, addr))
+                .map_err(HandlePacketError::from))
+        } else {
+            Either::B(future::err(HandlePacketError::from(HandlePacketErrorKind::OnionOrNetCrypto)))
+        }
+    }
+
     /// Set toxcore version and message of the day callback.
     pub fn set_bootstrap_info(&mut self, version: u32, motd_cb: Box<Fn(&Server) -> Vec<u8> + Send + Sync>) {
         self.bootstrap_info = Some(ServerBootstrapInfo {
@@ -1435,8 +1453,16 @@ impl Server {
     }
 
     /// Set sink to send friend's `SocketAddr` when it gets known.
-    pub fn set_friend_saddr_sink(&mut self, friend_saddr_sink: mpsc::UnboundedSender<PackedNode>) {
-        self.friend_saddr_sink = Some(friend_saddr_sink);
+    pub fn set_friend_saddr_sink(&self, friend_saddr_sink: mpsc::UnboundedSender<PackedNode>) {
+        *self.friend_saddr_sink.write() = Some(friend_saddr_sink);
+    }
+
+    pub fn set_onion_announce_response_sink(&self, tx: mpsc::UnboundedSender<(OnionAnnounceResponse, SocketAddr)>) {
+        *self.onion_announce_tx.write() = Some(tx);
+    }
+
+    pub fn set_onion_data_response_sink(&self, tx: mpsc::UnboundedSender<(OnionDataResponse, SocketAddr)>) {
+        *self.onion_data_tx.write() = Some(tx);
     }
 
     /// Get `PrecomputedKey`s cache.
@@ -2060,7 +2086,6 @@ mod tests {
         let (dht_pk, dht_sk) = gen_keypair();
         let mut alice = Server::new(udp_tx.clone(), dht_pk, dht_sk.clone());
 
-        let (dht_pk_tx, _dht_pk_rx) = mpsc::unbounded();
         let (lossless_tx, _lossless_rx) = mpsc::unbounded();
         let (lossy_tx, _lossy_rx) = mpsc::unbounded();
         let (real_pk, real_sk) = gen_keypair();
@@ -2069,7 +2094,6 @@ mod tests {
         let precomp = precompute(&alice.pk, &bob_sk);
         let net_crypto = NetCrypto::new(NetCryptoNewArgs {
             udp_tx,
-            dht_pk_tx,
             lossless_tx,
             lossy_tx,
             dht_pk,

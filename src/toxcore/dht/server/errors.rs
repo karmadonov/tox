@@ -136,6 +136,22 @@ impl From<IoError> for HandlePacketError {
     }
 }
 
+impl From<mpsc::SendError<(OnionAnnounceResponse, SocketAddr)>> for HandlePacketError {
+    fn from(error: mpsc::SendError<(OnionAnnounceResponse, SocketAddr)>) -> HandlePacketError {
+        HandlePacketError {
+            ctx: error.context(HandlePacketErrorKind::SendTo)
+        }
+    }
+}
+
+impl From<mpsc::SendError<(OnionDataResponse, SocketAddr)>> for HandlePacketError {
+    fn from(error: mpsc::SendError<(OnionDataResponse, SocketAddr)>) -> HandlePacketError {
+        HandlePacketError {
+            ctx: error.context(HandlePacketErrorKind::SendTo)
+        }
+    }
+}
+
 /// Error that can happen when calling `handle_onion_response_*` of packet.
 #[derive(Debug)]
 pub struct OnionResponseError {

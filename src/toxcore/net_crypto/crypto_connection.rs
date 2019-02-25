@@ -586,7 +586,7 @@ impl CryptoConnection {
         if sum > 0 {
             // send_array increased i.e. we sent more packets that was delivered
             // decrease total_sent packets by this number so that it includes only delivered packets
-            total_sent -= sum as u32;
+            total_sent -= sum as u32; // overflow?
         } else if total_resent > -sum as u32 {
             // send_array decreased and not all resent packets were delivered
             // use this number to count only delivered packets
@@ -633,7 +633,7 @@ impl CryptoConnection {
     pub fn update_congestion_stats(&mut self) {
         let now = clock_now();
         self.calculate_recv_rate(now);
-        self.calculate_send_rate(now);
+        // self.calculate_send_rate(now);
         self.reset_congestion_counters(now);
     }
 
