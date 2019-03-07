@@ -7,7 +7,7 @@ use nom::{le_u8, rest, AsBytes};
 use crate::toxcore::binary_io::*;
 
 /// Maximum size in bytes of chunk of file data
-const MAX_FILE_DATA_SIZE: usize = 1371;
+pub const MAX_FILE_DATA_SIZE: usize = 1371;
 
 /** FileData is a struct that holds chunk of data of a file to transfer to a friend.
 
@@ -27,8 +27,10 @@ Length    | Content
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileData {
-    file_id: u8,
-    data: Vec<u8>,
+    /// File id used in file transfer session
+    pub file_id: u8,
+    /// Chunk of data file
+    pub data: Vec<u8>,
 }
 
 impl FromBytes for FileData {

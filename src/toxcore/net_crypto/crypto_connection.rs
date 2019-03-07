@@ -265,6 +265,14 @@ impl<T: Into<SocketAddr> + Copy> ConnectionAddr<T> {
     }
 }
 
+/// Flag for send or receive
+pub enum SendOrReceive {
+    /// Send
+    Send,
+    /// Receive
+    Receive,
+}
+
 /** Secure connection to send data between two friends that provides encryption,
 ordered delivery, and perfect forward secrecy.
 

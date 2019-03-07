@@ -79,11 +79,16 @@ Length    | Content
 */
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileSendRequest {
-    file_id: u8,
-    file_type: FileType,
-    file_size: u64,
-    file_unique_id: FileUID,
-    file_name: String,
+    /// File id used in file transfer session
+    pub file_id: u8,
+    /// Type of transfer file
+    pub file_type: FileType,
+    /// Size of transfer file
+    pub file_size: u64,
+    /// A random key
+    pub file_unique_id: FileUID,
+    /// UTF-8 C string
+    pub file_name: String,
 }
 
 impl FromBytes for FileSendRequest {

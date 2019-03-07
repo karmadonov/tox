@@ -3,7 +3,9 @@
 #[macro_use]
 extern crate log;
 
-use std::io::{Error, ErrorKind};
+use std::io::{Error, ErrorKind, Write};
+use std::sync::Arc;
+use parking_lot::RwLock;
 
 use futures::*;
 use futures::sync::mpsc;
@@ -12,6 +14,8 @@ use tokio::net::UdpSocket;
 use failure::Fail;
 
 use std::net::SocketAddr;
+use std::fs::OpenOptions;
+use std::path::Path;
 
 use tox::toxcore::dht::server::*;
 use tox::toxcore::dht::server_ext::ServerExt;
@@ -24,6 +28,9 @@ use tox::toxcore::net_crypto::errors::SendLosslessPacketError;
 use tox::toxcore::onion::client::*;
 use tox::toxcore::tcp::client::Connections;
 use tox::toxcore::stats::Stats;
+use tox::toxcore::messenger::Messenger;
+use tox::toxcore::messenger::{Packet as MsgPacket, *};
+use tox::toxcore::binary_io::*;
 
 const BOOTSTRAP_NODES: [(&str, &str); 9] = [
     // Impyy
@@ -46,10 +53,18 @@ const BOOTSTRAP_NODES: [(&str, &str); 9] = [
     ("2B2137E094F743AC8BD44652C55F41DFACC502F125E99E4FE24D40537489E32F", "5.189.176.217:5190"),
 ];
 
-const SELF_SK: &str = "1A5EC1D6C3F1FA720A313C01F432B6AE0D4649A5121964C9992DDF32871E8DFD";
+#[derive(Clone)]
+struct FileName(Arc<RwLock<String>>);
 
-const FRIEND_PK: &str = "3E6A06DA48D1AB98549AD76890770B704AE9116D8654FBCD35C9BF2DB9233E21";
+impl FileName {
+    fn new(name: String) -> Self {
+        FileName(Arc::new(RwLock::new(name)))
+    }
+}
 
+const SELF_SK: &str = "B0EC513222557B96FACAF1B69651317CADB61147F7609D9CA13679D994569F48";
+
+const FRIEND_PK: &str = "4184577773A7928B028ACFC72E041322D196A4BB9B1944163AA214ADF5B9712F";
 /// Bind a UDP listener to the socket address.
 fn bind_socket(addr: SocketAddr) -> UdpSocket {
     let socket = UdpSocket::bind(&addr).expect("Failed to bind UDP socket");
@@ -136,6 +151,58 @@ fn main() {
         onion_client.add_path_node(node);
     }
 
+    let mut messenger = Messenger::new();
+    let (file_control_tx, file_control_rx) = mpsc::unbounded();
+    let (file_data_tx, file_data_rx) = mpsc::channel(32);
+    let net_crypto_ms = net_crypto.clone();
+    messenger.set_net_crypto(net_crypto_ms);
+    messenger.set_tx_file_data(file_data_tx);
+    messenger.set_tx_file_control(file_control_tx);
+    let onion_friend = OnionFriend::new(friend_pk);
+    messenger.add_friend(friend_pk, onion_friend);
+
+    let ms_c = messenger.clone();
+
+    let file_name = FileName::new("".to_owned());
+
+    let file_name_c = file_name.clone();
+    let file_control_future = file_control_rx
+        .map_err(|()| -> Error { unreachable!("rx can't fail") })
+        .for_each(move |(pk, packet)| {
+            if let Packet::FileControl(packet) = packet {
+                println!("FileControl = {:?}", packet);
+                Box::new(future::ok(())) as Box<Future<Item = (), Error = Error> + Send>
+            } else if let Packet::FileSendRequest(packet) = packet {
+                println!("FileSendRequest = {:?}", packet);
+                if packet.file_type == FileType::Avatar {
+                    return Box::new(future::ok(())) as Box<Future<Item = (), Error = Error> + Send>
+                }
+                *file_name_c.0.write() = packet.file_name;
+                Box::new(ms_c.send_file_control(friend_pk, packet.file_id, TransferDirection::Receive, ControlType::Accept)
+                    .map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
+            } else {
+                Box::new(future::ok(())) as Box<Future<Item = (), Error = Error> + Send>
+            }
+        });
+
+    let file_name_c = file_name.clone();
+    let file_data_future = file_data_rx
+        .map_err(|()| -> Error { unreachable!("rx can't fail") })
+        .for_each(move |(pk, packet, position)| {
+            if let Packet::FileData(packet) = packet {
+                let mut file = OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(Path::new(&(*file_name_c.0.read())))
+                    .unwrap();
+                println!("FileData = {:?}, position = {}", packet, position);
+                file.write(&packet.data).unwrap();
+                future::ok(())
+            } else {
+                future::ok(())
+            }
+        });
+
     let net_crypto_c = net_crypto.clone();
     let lossless_future = lossless_rx
         .map_err(|()| -> Error { unreachable!("rx can't fail") })
@@ -146,15 +213,24 @@ fn main() {
                 let f2 = net_crypto_c.send_lossless(pk, b"\x30tox-rs".to_vec());
                 let f3 = net_crypto_c.send_lossless(pk, b"\x40Hi from tox-rs!".to_vec());
 
-                Box::new(f1.join3(f2, f3).map(|_| ())) as Box<Future<Item = (), Error = SendLosslessPacketError> + Send>
+                Box::new(f1.join3(f2, f3).map(|_| ()).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
             } else if packet[0] == 0x10 { // wtf?
-                Box::new(net_crypto_c.send_lossless(pk, vec![0x10])) as Box<Future<Item = (), Error = SendLosslessPacketError> + Send>
+                Box::new(net_crypto_c.send_lossless(pk, vec![0x10]).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
             } else if packet[0] == 0x40 {
-                Box::new(net_crypto_c.send_lossless(pk, packet)) as Box<Future<Item = (), Error = SendLosslessPacketError> + Send>
+                Box::new(net_crypto_c.send_lossless(pk, packet).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
+            } else if packet[0] == 0x50 { // File Send Request
+                let (_, packet) = FileSendRequest::from_bytes(&packet).unwrap();
+                Box::new(messenger.handle_file_send_request(friend_pk, packet).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
+            } else if packet[0] == 0x51 { // File Control
+                let (_, packet) = FileControl::from_bytes(&packet).unwrap();
+                Box::new(messenger.handle_file_control(friend_pk, packet).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
+            } else if packet[0] == 0x52 { // File Data
+                let (_, packet) = FileData::from_bytes(&packet).unwrap();
+                Box::new(messenger.handle_file_data(friend_pk, packet).map_err(|e| Error::new(ErrorKind::Other, e.compat()))) as Box<Future<Item = (), Error = Error> + Send>
             }  else {
                 Box::new(future::ok(()))
             };
-            future.map_err(|_| Error::new(ErrorKind::Other, ""))
+            future
         });
 
     let lossy_future = lossy_rx
@@ -173,6 +249,8 @@ fn main() {
         Box::new(friend_connections.run()),
         Box::new(lossless_future),
         Box::new(lossy_future),
+        Box::new(file_control_future),
+        Box::new(file_data_future),
     ];
 
     let future = future::select_all(vec)

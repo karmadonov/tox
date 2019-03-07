@@ -6,14 +6,24 @@ use nom::{le_u8, be_u64};
 
 use crate::toxcore::binary_io::*;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
 /// Whether I am a sender or receiver of file data packet
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransferDirection {
     /// I am a sender
     Send = 0,
     /// I am a receiver
     Receive
+}
+
+impl TransferDirection {
+    /// Toggle direction
+    pub fn toggle(&self) -> Self {
+        if self == &TransferDirection::Send {
+            TransferDirection::Receive
+        } else {
+            TransferDirection::Send
+        }
+    }
 }
 
 impl FromBytes for TransferDirection {
@@ -25,8 +35,8 @@ impl FromBytes for TransferDirection {
     );
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Control types for transferring file data
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControlType {
     /// Accept a request of transferring file from a peer
     Accept,
@@ -83,9 +93,12 @@ Length    | Content
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileControl {
-    transfer_direction: TransferDirection,
-    file_id: u8,
-    control_type: ControlType,
+    /// Send or receive.
+    pub transfer_direction: TransferDirection,
+    /// Can not exceed 255
+    pub file_id: u8,
+    /// Kind of file transfer control.
+    pub control_type: ControlType,
 }
 
 impl FromBytes for FileControl {
